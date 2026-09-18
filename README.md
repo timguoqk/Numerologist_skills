@@ -30,6 +30,8 @@
 ```bash
 pip install -r qimen-dunjia/scripts/requirements.txt
 python qimen-dunjia/scripts/qimen_cli.py --input tmp/qimen_input.json --output tmp/qimen_output.json
+# 海外起局：加 --timezone 指定起局地时区，节气时刻会先换算到该时区再定局
+python qimen-dunjia/scripts/qimen_cli.py --input tmp/qimen_input.json --output tmp/qimen_output.json --timezone America/Los_Angeles
 ```
 
 ## Why This Repo
