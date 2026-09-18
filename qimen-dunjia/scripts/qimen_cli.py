@@ -14,6 +14,9 @@ from lunar_python import Lunar, Solar
 
 DEFAULT_RULESET = "mainline-cn-v1"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
+# lunar_python 的节气时刻固定按东八区（北京时间）计算，与起局地时区无关。
+# 海外起局时必须先把节气时刻换算到当地时区，再判断当前节令、阴阳遁和月柱。
+LUNAR_LIB_TIMEZONE = "Asia/Shanghai"
 CHINA_NAMES = {"cn", "china", "中国", "中华人民共和国", ""}
 
 JIAZI = [
@@ -329,11 +332,56 @@ def build_solar_and_lunar(normalized: NormalizedInput) -> tuple[Solar, Any]:
 
 
 def active_jie(lunar: Any) -> tuple[str, Any, Any]:
-    prev_jie = lunar.getPrevJie(False)
-    next_jie = lunar.getNextJie(False)
+    # 定局按全部二十四节气（节 + 中气）分段：冬至、春分、夏至、秋分、霜降等中气同样换局。
+    # getPrevJie 只看十二个"节"，会把冬至到小寒之间算成大雪、把秋分到寒露算成白露，因此必须用 JieQi 版本。
+    prev_jie = lunar.getPrevJieQi(False)
+    next_jie = lunar.getNextJieQi(False)
     if prev_jie is None:
         raise ValueError("无法确定当前节令")
     return prev_jie.getName(), prev_jie, next_jie
+
+
+@dataclass
+class JieqiContext:
+    """当前节令信息，节气时刻已换算到起局地时区。"""
+
+    active_jie: str
+    active_jie_at: datetime
+    next_jie: str | None
+    next_jie_at: datetime | None
+    year_ganzhi: str
+    month_ganzhi: str
+
+
+def lunar_lib_datetime_to_local(solar_obj: Any, local_tz: Any) -> datetime:
+    """把 lunar_python 返回的（北京时间）Solar 换算成起局地时区的 aware datetime。"""
+    naive = datetime.fromisoformat(solar_obj.toYmdHms().replace(" ", "T"))
+    return naive.replace(tzinfo=get_timezone(LUNAR_LIB_TIMEZONE)).astimezone(local_tz)
+
+
+def build_jieqi_context(local_dt: datetime) -> JieqiContext:
+    """按绝对时刻判断当前节令、年柱、月柱。
+
+    lunar_python 只认北京时间，所以先把起局时刻换算到北京时间再取节气，
+    这样同一绝对时刻在任何时区起局都落在同一个节令里；返回的节气时刻则换算回当地时区。
+    """
+    local_tz = local_dt.tzinfo
+    cn_dt = local_dt.astimezone(get_timezone(LUNAR_LIB_TIMEZONE))
+    cn_solar = Solar.fromYmdHms(cn_dt.year, cn_dt.month, cn_dt.day, cn_dt.hour, cn_dt.minute, cn_dt.second)
+    cn_lunar = cn_solar.getLunar()
+    jie_name, prev_jie, next_jie = active_jie(cn_lunar)
+    return JieqiContext(
+        active_jie=jie_name,
+        active_jie_at=lunar_lib_datetime_to_local(prev_jie.getSolar(), local_tz),
+        next_jie=next_jie.getName() if next_jie else None,
+        next_jie_at=lunar_lib_datetime_to_local(next_jie.getSolar(), local_tz) if next_jie else None,
+        year_ganzhi=cn_lunar.getYearInGanZhiExact(),
+        month_ganzhi=cn_lunar.getMonthInGanZhiExact(),
+    )
+
+
+def format_local(dt: datetime | None) -> str | None:
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else None
 
 
 def compute_yuan(day_ganzhi: str) -> str:
@@ -491,7 +539,8 @@ def detect_patterns(palaces: list[dict[str, Any]], zhifu: dict, xunshou_palace: 
 def build_chart(normalized: NormalizedInput, solar: Solar, lunar: Any) -> dict[str, Any]:
     warnings = list(normalized.warnings)
 
-    current_jie_name, prev_jie, next_jie = active_jie(lunar)
+    jieqi = build_jieqi_context(normalized.solar_dt)
+    current_jie_name = jieqi.active_jie
     dun_type = "阳遁" if current_jie_name in YANG_TERMS else "阴遁"
     day_ganzhi = lunar.getDayInGanZhiExact()
     yuan = compute_yuan(day_ganzhi)
@@ -548,14 +597,12 @@ def build_chart(normalized: NormalizedInput, solar: Solar, lunar: Any) -> dict[s
     zhifu = {"star": star_map[time_palace], "palace": time_palace}
     zhishi = {"door": door_map[time_palace], "palace": time_palace}
 
-    active_jie_dt = datetime.fromisoformat(prev_jie.getSolar().toYmdHms().replace(" ", "T")).replace(tzinfo=normalized.solar_dt.tzinfo)
-    next_jie_dt = None
-    if next_jie is not None:
-        next_jie_dt = datetime.fromisoformat(next_jie.getSolar().toYmdHms().replace(" ", "T")).replace(tzinfo=normalized.solar_dt.tzinfo)
-    if abs(normalized.solar_dt - active_jie_dt) <= timedelta(hours=24):
+    if abs(normalized.solar_dt - jieqi.active_jie_at) <= timedelta(hours=24):
         warnings.append("当前时间距离节令起点较近，属于节气边界附近。")
-    if next_jie_dt and abs(next_jie_dt - normalized.solar_dt) <= timedelta(hours=24):
+    if jieqi.next_jie_at and abs(jieqi.next_jie_at - normalized.solar_dt) <= timedelta(hours=24):
         warnings.append("当前时间距离下一个节令较近，属于节气边界附近。")
+    if normalized.timezone != LUNAR_LIB_TIMEZONE:
+        warnings.append(f"节气时刻已由北京时间换算到 {normalized.timezone}，节令与月柱按绝对时刻判定。")
 
     kongwang_branches = split_branch_pair(time_xunkong)
     kongwang_palaces = sorted({BRANCH_TO_PALACE[branch] for branch in kongwang_branches if branch in BRANCH_TO_PALACE})
@@ -662,9 +709,11 @@ def build_chart(normalized: NormalizedInput, solar: Solar, lunar: Any) -> dict[s
         "star_index": star_index,
         "detected_patterns": detected_patterns,
         "active_jie": current_jie_name,
-        "active_jie_started_at": prev_jie.getSolar().toYmdHms(),
-        "next_jie": next_jie.getName() if next_jie else None,
-        "next_jie_at": next_jie.getSolar().toYmdHms() if next_jie else None,
+        "active_jie_started_at": format_local(jieqi.active_jie_at),
+        "next_jie": jieqi.next_jie,
+        "next_jie_at": format_local(jieqi.next_jie_at),
+        "year_ganzhi": jieqi.year_ganzhi,
+        "month_ganzhi": jieqi.month_ganzhi,
         "grid_order": GRID_ORDER,
         "palaces": palaces,
         "warnings": warnings,
@@ -706,11 +755,13 @@ def build_output(payload: dict[str, Any]) -> dict[str, Any]:
                 "active_jie_started_at": chart["active_jie_started_at"],
                 "next_jie": chart["next_jie"],
                 "next_jie_at": chart["next_jie_at"],
+                "timezone": normalized.timezone,
             },
         },
         "ganzhi": {
-            "year": lunar.getYearInGanZhiExact(),
-            "month": lunar.getMonthInGanZhiExact(),
+            # 年柱、月柱以节气为界，按绝对时刻换算后判定；日柱、时柱按当地钟表时间。
+            "year": chart["year_ganzhi"],
+            "month": chart["month_ganzhi"],
             "day": lunar.getDayInGanZhiExact(),
             "time": lunar.getTimeInGanZhi(),
             "day_xun_exact": lunar.getDayXunExact(),
@@ -722,6 +773,7 @@ def build_output(payload: dict[str, Any]) -> dict[str, Any]:
             "id": str(payload.get("ruleset") or DEFAULT_RULESET),
             "name": "时家转盘奇门（大陆默认）",
             "timezone_default": DEFAULT_TIMEZONE,
+            "jieqi_rule": "节气时刻先换算到起局地时区，再判定当前节令、阴阳遁与月柱；日柱、时柱按当地钟表时间。",
             "dun_type_rule": "冬至到芒种用阳遁，夏至到大雪用阴遁，按当前节令判定。",
             "yuan_rule": "按日干支所在六十甲子序列，每 5 日一元，循环上元/中元/下元。",
             "ju_rule": "按当前节令和三元，从固定定局表取局数。",
@@ -758,6 +810,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Compute a structured qimen dunjia chart payload.")
     parser.add_argument("--input", required=True, help="Path to input JSON")
     parser.add_argument("--output", required=True, help="Path to output JSON")
+    parser.add_argument(
+        "--timezone",
+        help="起局地 IANA 时区（如 America/Los_Angeles），覆盖输入 JSON 里的 location.timezone",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -765,6 +821,10 @@ def main() -> int:
 
     try:
         payload = json.loads(input_path.read_text(encoding="utf-8-sig"))
+        if args.timezone:
+            location = dict(payload.get("location") or {})
+            location["timezone"] = args.timezone
+            payload["location"] = location
         output = build_output(payload)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")

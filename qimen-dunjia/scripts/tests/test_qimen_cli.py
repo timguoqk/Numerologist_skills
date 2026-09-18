@@ -384,9 +384,9 @@ class TestXunshouMapping:
 class TestEndToEndYangDun:
     """
     Golden data: 2026-03-24 10:30 上海
-    惊蛰后 → 阳遁
+    春分（2026-03-20 22:45 北京时间）后 → 阳遁；定局按二十四节气，中气同样换局
     日干支丁酉 → 上元
-    惊蛰上元 → 阳遁1局
+    春分上元 → 阳遁3局
     旬首甲辰 → 隐仪壬
     时干乙（巳时）
     旬空寅卯 → 3宫8宫
@@ -411,7 +411,7 @@ class TestEndToEndYangDun:
         assert output["chart"]["yuan"] == "上元"
 
     def test_ju_number(self, output):
-        assert output["chart"]["ju_number"] == 1
+        assert output["chart"]["ju_number"] == 3
 
     def test_xunshou(self, output):
         assert output["chart"]["xunshou"] == "甲辰"
@@ -430,16 +430,22 @@ class TestEndToEndYangDun:
 
     def test_zhifu(self, output):
         zf = output["chart"]["zhifu"]
-        assert zf["star"] == "天芮"
-        assert zf["palace"] == 9
+        assert zf["star"] == "天柱"
+        assert zf["palace"] == 2
 
     def test_zhishi(self, output):
         zs = output["chart"]["zhishi"]
-        assert zs["door"] == "死门"
-        assert zs["palace"] == 9
+        assert zs["door"] == "惊门"
+        assert zs["palace"] == 2
 
     def test_active_jie(self, output):
-        assert output["calendar"]["jieqi"]["active_jie"] == "惊蛰"
+        assert output["calendar"]["jieqi"]["active_jie"] == "春分"
+        assert output["calendar"]["jieqi"]["active_jie_started_at"] == "2026-03-20 22:45:59"
+        assert output["calendar"]["jieqi"]["next_jie"] == "清明"
+        assert output["calendar"]["jieqi"]["timezone"] == "Asia/Shanghai"
+
+    def test_ganzhi_month(self, output):
+        assert output["ganzhi"]["month"] == "辛卯"
 
     def test_ganzhi_day(self, output):
         assert output["ganzhi"]["day"] == "丁酉"
@@ -448,17 +454,17 @@ class TestEndToEndYangDun:
         assert output["ganzhi"]["time"] == "乙巳"
 
     def test_palace_earth_stems(self, output):
-        """验证阳遁1局地盘天干"""
+        """验证阳遁3局地盘天干：戊从3宫起顺布"""
         palaces = {p["palace"]: p for p in output["chart"]["palaces"]}
-        assert palaces[1]["earth_stem"] == "戊"
-        assert palaces[2]["earth_stem"] == "己"
-        assert palaces[3]["earth_stem"] == "庚"
-        assert palaces[4]["earth_stem"] == "辛"
-        assert palaces[5]["earth_stem"] == "壬"
-        assert palaces[6]["earth_stem"] == "癸"
-        assert palaces[7]["earth_stem"] == "丁"
-        assert palaces[8]["earth_stem"] == "丙"
-        assert palaces[9]["earth_stem"] == "乙"
+        assert palaces[3]["earth_stem"] == "戊"
+        assert palaces[4]["earth_stem"] == "己"
+        assert palaces[5]["earth_stem"] == "庚"
+        assert palaces[6]["earth_stem"] == "辛"
+        assert palaces[7]["earth_stem"] == "壬"
+        assert palaces[8]["earth_stem"] == "癸"
+        assert palaces[9]["earth_stem"] == "丁"
+        assert palaces[1]["earth_stem"] == "丙"
+        assert palaces[2]["earth_stem"] == "乙"
 
     def test_palace_stars(self, output):
         """验证九星分布"""
@@ -480,8 +486,8 @@ class TestEndToEndYangDun:
         """验证八神分布"""
         palaces = {p["palace"]: p for p in output["chart"]["palaces"]}
         assert palaces[5]["god"] is None  # 中宫无神
-        assert palaces[9]["god"] == "值符"
-        assert palaces[7]["god"] == "太阴"
+        assert palaces[2]["god"] == "值符"
+        assert palaces[6]["god"] == "太阴"
 
     def test_center_palace_flags(self, output):
         """验证中宫寄坤标记"""
@@ -884,10 +890,10 @@ class TestEndToEndNewFields:
     # --- 日干落宫 ---
 
     def test_yang_day_stem(self, yang_output):
-        # 日干丁, 阳遁1局地盘丁在7宫
+        # 日干丁, 阳遁3局地盘丁在9宫
         ds = yang_output["chart"]["day_stem"]
         assert ds["stem"] == "丁"
-        assert ds["palace"] == 7
+        assert ds["palace"] == 9
 
     def test_yin_day_stem(self, yin_output):
         # 日干庚, 阴遁5局地盘庚在3宫? Let's trust the output
@@ -933,9 +939,9 @@ class TestEndToEndNewFields:
                 ]
 
     def test_yang_palace_1_relation(self, yang_output):
-        # 宫1: 地=戊(土) 天=丙(火), 火生土 → 天生地
+        # 宫1: 地=丙(火) 天=癸(水), 水克火 → 天克地
         palaces = {p["palace"]: p for p in yang_output["chart"]["palaces"]}
-        assert palaces[1]["stem_relation"] == "天生地"
+        assert palaces[1]["stem_relation"] == "天克地"
 
 
 class TestYimaTable:
@@ -973,3 +979,97 @@ class TestWuxingConstants:
         assert WUXING_KE["水"] == "火"
         assert WUXING_KE["火"] == "金"
         assert WUXING_KE["金"] == "木"
+
+
+# ============================================================
+# 17. 节气按绝对时刻换算到起局地时区
+# ============================================================
+
+class TestJieqiTimezone:
+    """
+    lunar_python 的节气时刻是北京时间。海外起局时必须先换算，
+    否则节气交接后十几个小时内的时辰会落在上一个节令里。
+    2026 寒露：北京时间 10-08 14:29:17 = 洛杉矶（PDT）10-07 23:29:17。
+    """
+
+    @staticmethod
+    def _run(time_input, tz, country="USA", city="San Francisco"):
+        return build_output({
+            "question_type": "出行",
+            "question_goal": "择时",
+            "time_input": time_input,
+            "calendar_type": "solar",
+            "location": {"country": country, "city": city, "timezone": tz},
+            "ruleset": "mainline-cn-v1",
+        })
+
+    def test_la_morning_after_hanlu_is_hanlu(self):
+        out = self._run("2026-10-08 07:00", "America/Los_Angeles")
+        jieqi = out["calendar"]["jieqi"]
+        assert jieqi["active_jie"] == "寒露"
+        assert jieqi["active_jie_started_at"] == "2026-10-07 23:29:17"
+        assert jieqi["timezone"] == "America/Los_Angeles"
+        assert out["ganzhi"]["month"] == "戊戌"
+        assert out["chart"]["ju_number"] == JU_TABLE["阴遁"]["寒露"][out["chart"]["yuan"]]
+
+    def test_la_evening_before_hanlu_is_qiufen(self):
+        out = self._run("2026-10-07 20:00", "America/Los_Angeles")
+        jieqi = out["calendar"]["jieqi"]
+        assert jieqi["active_jie"] == "秋分"
+        assert jieqi["next_jie"] == "寒露"
+        assert jieqi["next_jie_at"] == "2026-10-07 23:29:17"
+        assert out["ganzhi"]["month"] == "丁酉"
+
+    def test_same_instant_same_jie_across_timezones(self):
+        # 北京 10-08 14:00 与洛杉矶 10-07 23:00 是同一绝对时刻，节令必须一致
+        cn = self._run("2026-10-08 14:00", "Asia/Shanghai", "中国", "上海")
+        la = self._run("2026-10-07 23:00", "America/Los_Angeles")
+        assert cn["calendar"]["jieqi"]["active_jie"] == la["calendar"]["jieqi"]["active_jie"] == "秋分"
+        assert cn["ganzhi"]["month"] == la["ganzhi"]["month"]
+
+    def test_shanghai_output_unchanged(self):
+        out = self._run("2026-10-08 14:30", "Asia/Shanghai", "中国", "上海")
+        assert out["calendar"]["jieqi"]["active_jie"] == "寒露"
+        assert out["calendar"]["jieqi"]["active_jie_started_at"] == "2026-10-08 14:29:17"
+        assert not any("换算" in w for w in out["warnings"])
+
+    def test_overseas_gets_conversion_warning(self):
+        out = self._run("2026-10-08 07:00", "America/Los_Angeles")
+        assert any("换算到 America/Los_Angeles" in w for w in out["warnings"])
+
+    def test_day_and_time_pillars_follow_local_clock(self):
+        # 日柱、时柱按当地钟表时间：洛杉矶 10-08 07:00 是戊辰日辰时
+        out = self._run("2026-10-08 07:00", "America/Los_Angeles")
+        assert out["ganzhi"]["day"] == "乙卯"
+        assert out["ganzhi"]["time"][1] == "辰"
+
+
+class TestZhongqiChangesJu:
+    """中气（冬至、春分、夏至、秋分、霜降……）同样换局。"""
+
+    @staticmethod
+    def _run(time_input):
+        return build_output({
+            "question_type": "x",
+            "question_goal": "y",
+            "time_input": time_input,
+            "calendar_type": "solar",
+            "location": {"country": "中国", "city": "上海", "timezone": "Asia/Shanghai"},
+        })
+
+    def test_after_dongzhi_is_yang_dun(self):
+        # 2025 冬至 12-21 23:03 之后、小寒之前必须已是阳遁冬至局，而不是阴遁大雪局
+        out = self._run("2025-12-25 10:00")
+        assert out["calendar"]["jieqi"]["active_jie"] == "冬至"
+        assert out["chart"]["dun_type"] == "阳遁"
+        assert out["chart"]["ju_number"] == JU_TABLE["阳遁"]["冬至"][out["chart"]["yuan"]]
+
+    def test_after_xiazhi_is_yin_dun(self):
+        out = self._run("2026-06-25 10:00")
+        assert out["calendar"]["jieqi"]["active_jie"] == "夏至"
+        assert out["chart"]["dun_type"] == "阴遁"
+
+    def test_after_shuangjiang_uses_shuangjiang_table(self):
+        out = self._run("2026-10-24 10:00")
+        assert out["calendar"]["jieqi"]["active_jie"] == "霜降"
+        assert out["chart"]["ju_number"] == JU_TABLE["阴遁"]["霜降"][out["chart"]["yuan"]]

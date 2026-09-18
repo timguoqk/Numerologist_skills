@@ -48,7 +48,8 @@ compatibility: Requires Python 3.11+, lunar_python, and tzdata; run scripts/qime
 - 体系：时家转盘奇门
 - 默认时区：`Asia/Shanghai`
 - 默认适用区域：中国大陆优先
-- 定局：置闰法工程化实现
+- 定局：置闰法工程化实现，按二十四节气（含中气）分段
+- 节气换算：节气时刻先换算到起局地时区再判定节令和月柱；日柱、时柱按当地钟表时间
 - 中宫/寄宫：中宫相关判断一律寄坤处理
 
 详细规则见 `references/ruleset-mainline.md`。
@@ -123,6 +124,8 @@ python "qimen-dunjia/scripts/qimen_cli.py" \
 
 先把输入 JSON 写入 `tmp/qimen_input.json`，再执行上述命令，读取 `tmp/qimen_output.json`。`tmp/` 也可以替换成任意可写的临时目录。
 
+海外起局时把 IANA 时区写进 `location.timezone`（如 `America/Los_Angeles`），或者用 `--timezone America/Los_Angeles` 覆盖输入文件里的时区。脚本会把节气时刻换算到这个时区再判定节令，输出里的 `calendar.jieqi` 也按这个时区显示，并带一条"节气时刻已换算"的提醒。
+
 输入 JSON 最低字段：
 
 ```json
@@ -153,7 +156,7 @@ python "qimen-dunjia/scripts/qimen_cli.py" \
 | 字段 | 用途 |
 |------|------|
 | `normalized_input` | 确认时间、时区、事项被正确解析 |
-| `calendar` | 公历/农历对照、当前节令 |
+| `calendar` | 公历/农历对照、当前节令（`jieqi` 里的时刻已换算到起局地时区，`timezone` 字段说明是哪个时区）|
 | `ganzhi` | 年月日时干支、日旬、时旬（用于定旬首/旬空） |
 | `chart.dun_type` | 阴遁/阳遁 |
 | `chart.yuan` | 上元/中元/下元 |
